@@ -42,17 +42,8 @@ static CHANNEL: Channel<CriticalSectionRawMutex, Measure, 2000> = Channel::new()
 
 #[embassy_executor::task]
 async fn display_task() {
-	let mut per_sec = 0;
-	let mut ticker = Ticker::every(Duration::from_secs(1));
-
 	loop {
-		if let Either::First(received) = select(CHANNEL.receive(), ticker.next()).await {
-			trace!("received: {}", received);
-			per_sec += 1
-		} else {
-			info!("per sec: {}", per_sec);
-			per_sec = 0
-		}
+		trace!("received: {}", CHANNEL.receive().await);
 	}
 }
 
@@ -67,11 +58,25 @@ async fn measure_task(twim: TWISPI0, sda: AnyPin, scl: AnyPin) {
 		panic!("into mag continuous error");
 	};
 
+	let mut ticker = Ticker::every(Duration::from_secs(1));
+	let mut per_sec = 0;
+
 	loop {
-		if sensor.mag_status().await.unwrap().xyz_new_data() {
-			CHANNEL
-				.send(sensor.magnetic_field().await.unwrap().xyz_nt())
-				.await;
+		match select(ticker.next(), sensor.mag_status()).await {
+			Either::First(_) => {
+				info!("measures per second: {}", per_sec);
+				per_sec = 0;
+			}
+			Either::Second(Ok(status)) => {
+				if status.xyz_new_data() {
+					CHANNEL
+						.send(sensor.magnetic_field().await.unwrap().xyz_nt())
+						.await;
+					per_sec += 1;
+				}
+			}
+			Either::Second(Err(lsm303agr::Error::Comm(e))) => info!("comm error: {}", e),
+			Either::Second(Err(lsm303agr::Error::InvalidInputData)) => info!("invalid input data"),
 		}
 	}
 }
